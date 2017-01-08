@@ -1,6 +1,7 @@
 package mediorganize
 
 import ammonite.ops._
+import ammonite.ops.ImplicitWd._
 
 object FixVideoTimestamps extends App {
   val listing = ls.rec!
@@ -16,7 +17,7 @@ object FixVideoTimestamps extends App {
     // TODO: look at other fields for file date (matching y/m/d)
     val result = %%exiftool("-s", "-FileModifyDate", file)
 
-    result.head match {
+    result.out.lines.head match {
       case altRegex(altDate) => Some(altDate)
       case _ => None
     }
@@ -39,12 +40,12 @@ object FixVideoTimestamps extends App {
   def changeDate(date: String, file: Path): String = {
     val options = List("FileModifyDate", "CreateDate", "ModifyDate", "TrackCreateDate", "TrackModifyDate", "MediaCreateDate",
       "MediaModifyDate", "AllDates").map(tag => s""""-$tag=$date"""").mkString(" ")
-    val relPath = file relativeTo cwd
+    val relPath = file relativeTo pwd
     val relPathStr = relPath.toString.replace(" ", "\\ ")
     s"""echo "$date -> $relPath"\nexiftool $options $relPathStr\n"""
   }
 
-  val shellFile = cwd/"commands.sh"
+  val shellFile = pwd/"commands.sh"
   write.over(shellFile, "")
   videos.foreach {
     video =>

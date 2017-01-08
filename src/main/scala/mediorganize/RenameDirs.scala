@@ -1,6 +1,7 @@
 package mediorganize
 
 import ammonite.ops._
+import ammonite.ops.ImplicitWd._
 import scala.language.postfixOps
 
 object RenameDirs {
@@ -9,7 +10,7 @@ object RenameDirs {
   val template = """^(\d\d\d\d)_(\d\d)_(\d\d)(.*)$""".r
   val target = """^(\d\d\d\d)-(\d\d)-(\d\d)(.*)$""".r
 
-  val shellFile = cwd/"mv.sh"
+  val shellFile = pwd/"mv.sh"
   write.over(shellFile, "")
 
   dirs.foreach {
@@ -18,8 +19,8 @@ object RenameDirs {
         case template(year, month, day, rest) =>
           // rename
           val newName = s"$year-$month-$day${rest.replace("-", "\\ ")}"
-          val parent = (dir/up) relativeTo cwd
-          val cmd = s"mv ${dir relativeTo cwd} $parent/$newName\n"
+          val parent = (dir/up) relativeTo pwd
+          val cmd = s"mv ${dir relativeTo pwd} $parent/$newName\n"
           print(cmd)
           write.append(shellFile, cmd)
         case target(year, month, day, rest) =>
