@@ -1,6 +1,7 @@
 package mediorganize
 
 import ammonite.ops._
+import scala.language.postfixOps
 
 object RenameDirs {
   val listing = ls.rec!

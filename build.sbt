@@ -1,6 +1,6 @@
-
 lazy val root = project.in(file("."))
 
+scalaVersion := "2.11.8"
 name := "mediorganize"
 normalizedName := "mediorganize"
 version := "0.1-SNAPSHOT"
@@ -35,5 +35,5 @@ pomExtra := (
   )
 
 libraryDependencies ++= Seq(
-  "com.lihaoyi" %% "ammonite-ops" % "0.4.7"
+  "com.lihaoyi" %% "ammonite-ops" % "0.8.1"
 )
