@@ -226,7 +226,13 @@ package object mediorganize {
     val options = fields.map{case(key, date) => s"-$key=$date"}
     val cmd     = %.extend("exiftool" +: options, Map.empty)
     println(s"$file --> ${fields.map{case(k,v) => s"$k=$v"}.mkString("  ")}")
-    cmd(file)
+    try {
+      cmd(file)
+    } catch {
+      case ShelloutException(res) =>
+        println(s"error updating file $file")
+        println(res.err.string)
+    }
   }
 
   def report(file: Path): MetadataReport = {
@@ -271,11 +277,14 @@ package object mediorganize {
         val shouldCorrect = fields(4).toBoolean
         if (shouldCorrect) {
           val path        = Path(fields(1))
-          val targetDate  = FileDate.fromExif(fields(5)).get
-          val fieldsToSet = if (isImage(path)) AllPhotoDateFields else AllVideoDateFields
-          val changes     = fieldsToSet.map(_ -> targetDate)
-          setExifDates(path, changes)
-          write.append(fixed, s"$path,$targetDate,${fieldsToSet.mkString(",")}\n")
+          // can't write AVI files
+          if (!path.ext.equalsIgnoreCase("AVI")) {
+            val targetDate  = FileDate.fromExif(fields(5)).get
+            val fieldsToSet = if (isImage(path)) AllPhotoDateFields else AllVideoDateFields
+            val changes     = fieldsToSet.map(_ -> targetDate)
+            setExifDates(path, changes)
+            write.append(fixed, s"$path,$targetDate,${fieldsToSet.mkString(",")}\n")
+          }
         }
     }
   }
