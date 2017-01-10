@@ -1,3 +1,5 @@
+import scala.util.{Failure, Success, Try}
+
 package object mediorganize {
   import java.security.{DigestInputStream, MessageDigest}
   import java.text.SimpleDateFormat
@@ -35,7 +37,7 @@ package object mediorganize {
   val AllDates         = "AllDates"
 
   val AllDateFields      : Seq[String] = Seq(FileModifyDate, TrackCreateDate, TrackModifyDate, MediaCreateDate, MediaModifyDate, AllDates)
-  val DateFieldPrecedence: Seq[String] = Seq(DateTimeOriginal, CreateDate, TrackCreateDate)
+  val DateFieldPrecedence: Seq[String] = Seq(DateTimeOriginal, CreateDate, TrackCreateDate, MediaCreateDate, ModifyDate, TrackModifyDate, MediaModifyDate)
   val AllPhotoDateFields : Seq[String] = Seq(DateTimeOriginal, CreateDate, ModifyDate)
   val AllVideoDateFields : Seq[String] = Seq(DateTimeOriginal, FileModifyDate, CreateDate, ModifyDate, TrackCreateDate, TrackModifyDate, MediaCreateDate, MediaModifyDate)
 
@@ -44,10 +46,13 @@ package object mediorganize {
   val ExifFullDate    : Regex = """^(\d{4})(?::(\d\d)(?::(\d\d)(?: (\d\d)(?::(\d\d)(?::(\d\d)(?:([+\-]\d\d:\d\d))?)?)?)?)?)?""".r
   val FileDateRegex   : Regex = """(\d{4}\b)(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b)?)?)?)?)?.*""".r // month and day are optional
 
-  def recursiveFileListing(root: Path, extensions: Set[String]): Seq[Path] = {
+  def recursiveFileListing(root: Path, extensions: Set[String], skips: Seq[Path] = Seq.empty): Seq[Path] = {
     require(root.isDir, s"directory required for recursive listing. Was: $root")
-    val listing = ls.rec! root
-    listing.filter(file => file.isFile && extensions.contains(file.ext))
+    val skipSet = skips.toSet
+    def shouldSkip(path: Path): Boolean = {
+      skipSet.contains(path) || (path.isFile && !extensions.contains(path.ext))
+    }
+    ls.rec(shouldSkip _)(root).filter(_.isFile)
   }
 
   def isImage(file: Path): Boolean = {
@@ -301,22 +306,123 @@ package object mediorganize {
                       exif: Map[String, String]
                       )
 
-  def mediaInfo(file: Path, base: Path = pwd): MediaInfo = {
+  def mediaInfo(file: Path, base: Path = pwd): Try[MediaInfo] = {
     require(file.isFile)
     val rel = file.relativeTo(base)
-    val sha = toHex(sha1(file))
-    val stats = stat! file
-    val exifFields = exif(file)
-    MediaInfo(rel, sha, stats.size, exifFields.toMap)
+    sha1(file).map{
+      shaBytes =>
+        val sha = toHex(shaBytes)
+        val stats = stat! file
+        val exifFields = exif(file)
+        MediaInfo(rel, sha, stats.size, exifFields.toMap)
+    }
+  }
+
+  def makeCopyCommands(sourceDir: Path, targetDir: Path, queue: Path): Unit = {
+    val script = pwd/s"${now()}_copy.sh"
+    write.append(script, """export IFS="$(printf '\\n\\t')"""" + "\n")
+    read(queue).lines.foreach {
+      line =>
+        if (!line.trim.isEmpty) {
+          val fields = line.split("\t")
+          val source = RelPath(fields(2))
+          val target = RelPath(fields(3))
+          write.append(script, s"""cp -p "${sourceDir/source}" "${targetDir/target}"\n""")
+        }
+    }
+  }
+
+  def suggestCopy(sourceDir: Path, targetDir: Path, extensions: Set[String] = AllExtensions, skips: Seq[Path] = Seq.empty): Unit = {
+    val dateStr = now()
+    val suggestions = sourceDir/s"$dateStr copy.tsv"
+    val possibleDups = targetDir/s"$dateStr dups.tsv"
+    val missing = sourceDir/s"$dateStr missing.json"
+    val log = sourceDir/s"$dateStr.log"
+
+    var listingByYear = Map.empty[String, Seq[Path]]
+
+    def getListing(year: String): Seq[Path] = {
+      listingByYear.get(year) match {
+        case Some(listing) =>
+          listing
+        case None =>
+          val listing = recursiveFileListing(targetDir/year, AllExtensions)
+          listingByYear = listingByYear + (year -> listing)
+          listing
+      }
+    }
+
+    recursiveFileListing(sourceDir, extensions, skips).foreach {
+      sourceFile =>
+        println(s"checking on source $sourceFile")
+        mediaInfo(sourceFile, sourceDir) match {
+          case Success(sourceInfo) =>
+            val maybeSourceDate = DateFieldPrecedence.collectFirst {
+              case field if sourceInfo.exif.contains(field) =>
+                FileDate.fromExif(sourceInfo.exif(field))
+            }.flatten
+            maybeSourceDate match {
+              case Some(sourceDate) =>
+                sourceDate.year match {
+                  case Some(year) =>
+                    val targetListing = getListing(year)
+                    val candidates = targetListing.filter(_.name == sourceFile.name)
+                    if (candidates.size > 1) {
+                      write.append(possibleDups, candidates.mkString("\t") + "\n")
+                    }
+                    candidates.foreach {
+                      candidate =>
+                        mediaInfo(candidate, targetDir) match {
+                          case Success(candidateInfo) =>
+                            if (candidateInfo.sha1 != sourceInfo.sha1) {
+                              val sizeDiff = sourceInfo.size - candidateInfo.size
+
+                              println(
+                                s"""
+                                   |found ${candidates.size} target(s)
+                                   |size diffence: $sizeDiff
+                                   |source size  : ${sourceInfo.size}
+                                   |target size  : ${candidateInfo.size}
+                                   |source       : $sourceFile
+                                   |targets      :
+                                   |${candidates.mkString("\n")}
+                                 """.stripMargin)
+                              write.append(log, s"sizeDiff=$sizeDiff;srcPath=$sourceFile;candidatePath=$candidate\n")
+                              write.append(suggestions,
+                                Seq(
+                                  candidates.size, sizeDiff,
+                                  sourceFile.relativeTo(sourceDir),
+                                  candidate.relativeTo(targetDir)
+                                ).map(_.toString).mkString("\t") + "\n")
+                            }
+                          case Failure(e) =>
+                            println(s"failed reading info for $candidate\n$e")
+                        }
+                    }
+                    if (candidates.isEmpty) {
+                      write.append(missing, upickle.default.write(sourceInfo))
+                    }
+                  case None =>
+                }
+              case None =>
+            }
+          case Failure(e) =>
+            println(s"failed reading info for $sourceFile\n$e")
+        }
+    }
   }
 
   def index(dir: Path, extensions: Set[String] = AllExtensions): Unit = {
     val index   = dir/s"${now()} index.json"
     recursiveFileListing(dir, extensions).foreach {
       file =>
-        val info = mediaInfo(file, dir)
-        // each line in the index is an independent JSON object to be read
-        write.append(index, upickle.default.write(info) + "\n")
+        mediaInfo(file, dir) match {
+          case Success(info) =>
+            // each line in the index is an independent JSON object to be read
+            write.append(index, upickle.default.write(info) + "\n")
+          case Failure(e) =>
+            println(s"failed to get info for file $file:\n$e")
+        }
     }
   }
 
@@ -329,16 +435,26 @@ package object mediorganize {
   }
 
   // BEWARE: uses blocking I/O
-  def sha1(file: Path): Array[Byte] = {
+  // TODO: use Future and non-blocking I/O
+  def sha1(file: Path): Try[Array[Byte]] = {
     require(file.isFile)
     val hasher = MessageDigest.getInstance("SHA-1")
-    val stream = read.getInputStream(file)
-    val digestStream = new DigestInputStream(stream, hasher)
-    val buffer = new Array[Byte](1024) // TODO: configure buffer size? use available() to reduce blocking?
-    while(digestStream.read(buffer) > -1) {
-      // keep on reading
+    Try(read.getInputStream(file)) match {
+      case Success(stream) =>
+        val result = Try {
+          val digestStream = new DigestInputStream(stream, hasher)
+          val buffer = new Array[Byte](1024) // TODO: configure buffer size? use available() to reduce blocking?
+          while(digestStream.read(buffer) > -1) {
+            // keep on reading
+          }
+          digestStream.getMessageDigest.digest()
+        }
+        // always close the stream, no matter what
+        stream.close()
+        result
+      case Failure(f) =>
+        Failure(f)
     }
-    digestStream.getMessageDigest.digest()
   }
 
   def toHex(bytes: Array[Byte]): String = {
