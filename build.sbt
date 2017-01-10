@@ -35,5 +35,6 @@ pomExtra := (
   )
 
 libraryDependencies ++= Seq(
-  "com.lihaoyi" %% "ammonite-ops" % "0.8.1"
+  "com.lihaoyi" %% "ammonite-ops" % "0.8.1",
+  "com.lihaoyi" %% "upickle" % "0.4.3"
 )

@@ -1,12 +1,14 @@
-import ammonite.ops._
-import ammonite.ops.ImplicitWd._
-import java.text.SimpleDateFormat
-import java.util.Calendar
-
-import scala.language.postfixOps
-import scala.util.matching.Regex
-
 package object mediorganize {
+  import java.security.{DigestInputStream, MessageDigest}
+  import java.text.SimpleDateFormat
+  import java.util.Calendar
+
+  import ammonite.ops.ImplicitWd._
+  import ammonite.ops._
+
+  import scala.language.postfixOps
+  import scala.util.matching.Regex
+
   // extensions are treated as case-insensitive
   val ImageExtensions: Set[String] = {
     val lowercase = Set("jpg", "jpeg", "gif", "png", "tif", "tiff", "bmp", "cr2", "ppm", "crw", "dcm")
@@ -16,7 +18,11 @@ package object mediorganize {
     val lowercase = Set("mov", "m4v", "thm", "mp4", "mod", "mpeg", "mpg", "mp2",  "avi")
     lowercase ++ lowercase.map(_.toUpperCase)
   }
-  val AllExtensions  : Set[String] = ImageExtensions ++ VideoExtensions
+  val AllExtensions                  : Set[String] = ImageExtensions ++ VideoExtensions
+  val UnsupportedExtensionsForWriting: Set[String] = {
+    val lowercase = Set("mod", "avi", "mpg")
+    lowercase ++ lowercase.map(_.toUpperCase)
+  }
 
   val DateTimeOriginal = "DateTimeOriginal"
   val FileModifyDate   = "FileModifyDate"
@@ -33,7 +39,7 @@ package object mediorganize {
   val AllPhotoDateFields : Seq[String] = Seq(DateTimeOriginal, CreateDate, ModifyDate)
   val AllVideoDateFields : Seq[String] = Seq(DateTimeOriginal, FileModifyDate, CreateDate, ModifyDate, TrackCreateDate, TrackModifyDate, MediaCreateDate, MediaModifyDate)
 
-  val ExifFieldRegex  : Regex = """^([a-zA-Z0-9_]+) +: +(.*)$""".r
+  val ExifFieldRegex  : Regex = """^([a-zA-Z0-9_\-]+) +: +(.*)$""".r
   val ExifYearMonthDay: Regex = """^(\d\d\d\d):(\d\d):(\d\d).*$""".r
   val ExifFullDate    : Regex = """^(\d{4})(?::(\d\d)(?::(\d\d)(?: (\d\d)(?::(\d\d)(?::(\d\d)(?:([+\-]\d\d:\d\d))?)?)?)?)?)?""".r
   val FileDateRegex   : Regex = """(\d{4}\b)(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b(?:[_\-](\d\d)\b)?)?)?)?)?.*""".r // month and day are optional
@@ -214,9 +220,31 @@ package object mediorganize {
           None
       }
     } catch {
+      // TODO: use Try instead
       case ShelloutException(res) =>
         println(s"error with file path $file")
         println(res.err.string)
+        Seq.empty
+    }
+  }
+
+
+  def exif(file: Path): Seq[(String, String)] = {
+    require(file.isFile)
+    try {
+      val result = %%exiftool("-s", file)
+      result.out.lines.flatMap {
+        case ExifFieldRegex(key, value) =>
+          Some(key -> value)
+        case _ =>
+          None
+      }
+    } catch {
+      // TODO: use Try instead
+      case ShelloutException(res) =>
+        println(s"error obtaining exif from file $file")
+        println(res.err.string)
+        println(res.out.string)
         Seq.empty
     }
   }
@@ -266,6 +294,57 @@ package object mediorganize {
     }
   }
 
+  case class MediaInfo(
+                      relPath: RelPath,
+                      sha1: String,
+                      size: Long,
+                      exif: Map[String, String]
+                      )
+
+  def mediaInfo(file: Path, base: Path = pwd): MediaInfo = {
+    require(file.isFile)
+    val rel = file.relativeTo(base)
+    val sha = toHex(sha1(file))
+    val stats = stat! file
+    val exifFields = exif(file)
+    MediaInfo(rel, sha, stats.size, exifFields.toMap)
+  }
+
+  def index(dir: Path, extensions: Set[String] = AllExtensions): Unit = {
+    val index   = dir/s"${now()} index.json"
+    recursiveFileListing(dir, extensions).foreach {
+      file =>
+        val info = mediaInfo(file, dir)
+        // each line in the index is an independent JSON object to be read
+        write.append(index, upickle.default.write(info) + "\n")
+    }
+  }
+
+  def readIndex(idx: Path): Seq[MediaInfo] = {
+    require(idx.isFile)
+    read(idx).lines.map {
+      line =>
+        upickle.default.read[MediaInfo](line)
+    }.toSeq
+  }
+
+  // BEWARE: uses blocking I/O
+  def sha1(file: Path): Array[Byte] = {
+    require(file.isFile)
+    val hasher = MessageDigest.getInstance("SHA-1")
+    val stream = read.getInputStream(file)
+    val digestStream = new DigestInputStream(stream, hasher)
+    val buffer = new Array[Byte](1024) // TODO: configure buffer size? use available() to reduce blocking?
+    while(digestStream.read(buffer) > -1) {
+      // keep on reading
+    }
+    digestStream.getMessageDigest.digest()
+  }
+
+  def toHex(bytes: Array[Byte]): String = {
+    bytes.map("%02x" format _).mkString
+  }
+
   def correct(corrections: Path): Unit = {
     require(corrections.isFile, s"corrections must be a file. was: $corrections")
     val dateStr = now()
@@ -277,8 +356,8 @@ package object mediorganize {
         val shouldCorrect = fields(4).toBoolean
         if (shouldCorrect) {
           val path        = Path(fields(1))
-          // can't write AVI files
-          if (!path.ext.equalsIgnoreCase("AVI")) {
+          // can't write some file types
+          if (!UnsupportedExtensionsForWriting.contains(path.ext)) {
             val targetDate  = FileDate.fromExif(fields(5)).get
             val fieldsToSet = if (isImage(path)) AllPhotoDateFields else AllVideoDateFields
             val changes     = fieldsToSet.map(_ -> targetDate)
